@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF anzeigen – Persistenter Viewer</title>
+  <style>
+    :root { --bg:#0b0b0c; --panel:#15161a; --text:#e7e7ea; --muted:#a8acb3; --accent:#4f8cff; --border:#26272b; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; }
+    header { padding: 16px 20px; border-bottom: 1px solid var(--border); background: linear-gradient(180deg, #101114, #0b0b0c); position: sticky; top: 0; z-index: 2; }
+    h1 { margin: 0; font-size: 18px; }
+    .controls { display: grid; gap: 10px; grid-template-columns: 1fr auto; align-items: center; margin-top: 10px; }
+    .toolbar { display: flex; gap: 10px; flex-wrap: wrap; }
+    input[type="url"], .file-btn, button { border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 10px; height: 40px; padding: 0 12px; }
+    input[type="url"] { width: 100%; }
+    button, .file-btn { cursor: pointer; }
+    .file-input { display: none; }
+    .file-btn { display: inline-flex; align-items: center; gap: 8px; }
+    .file-btn svg { width: 16px; height: 16px; }
+    .muted { color: var(--muted); font-size: 13px; }
+
+    .dropzone { border: 1px dashed var(--border); color: var(--muted); border-radius: 12px; padding: 16px; text-align: center; margin-top: 10px; }
+    .dropzone.is-dragover { border-color: var(--accent); color: var(--text); background: #0f1220; }
+
+    #layout { display: grid; grid-template-columns: 340px 1fr; gap: 0; }
+    #sidebar { border-right: 1px solid var(--border); min-height: calc(100vh - 84px); background: #0e0f12; }
+    #viewer-wrapper { position: fixed; inset: 84px 0 0 340px; }
+    @media (max-width: 920px){
+      #layout { grid-template-columns: 1fr; }
+      #sidebar { display: none; }
+      #viewer-wrapper { inset: 84px 0 0 0; }
+    }
+    iframe#viewer { width: 100%; height: 100%; border: 0; background: #1b1c20; }
+
+    .status { position: fixed; right: 12px; bottom: 12px; background: #111216; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; max-width: 80vw; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
+    .status a { color: var(--accent); text-decoration: none; }
+    .status b { color: var(--text); }
+    .error { background: #2a1111; border-color: #532222; color: #ffbdbd; }
+
+    /* Library */
+    #library { padding: 14px; }
+    #library h2 { font-size: 14px; margin: 6px 0 12px; color: var(--muted); letter-spacing:.2px; }
+    .saved-list { display: grid; gap: 8px; }
+    .saved-item { border: 1px solid var(--border); background: var(--panel); border-radius: 12px; padding: 10px; }
+    .saved-top { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+    .saved-name { font-size: 14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .saved-meta { font-size:12px; color:var(--muted); margin-top:4px; }
+    .row-actions { display:flex; gap:8px; }
+    .row-actions button { height: 32px; }
+    .empty { opacity:.8; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PDF anzeigen (mit dauerhaftem Speichern im Browser)</h1>
+    <div class="controls">
+      <input id="url-input" type="url" placeholder="PDF-URL einfügen (z. B. https://example.com/datei.pdf)" />
+      <div class="toolbar">
+        <label class="file-btn" title="PDF von Ihrem Gerät wählen">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 16v-8m0 0-3 3m3-3 3 3M4 16.5V17a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Datei wählen</span>
+          <input id="file-input" class="file-input" type="file" accept="application/pdf" />
+        </label>
+        <button id="load-url-btn" type="button">URL laden</button>
+        <button id="save-url-btn" type="button" title="PDF von URL abrufen & dauerhaft speichern">URL speichern</button>
+      </div>
+      <div class="dropzone" id="dropzone">Oder PDF hierher ziehen & ablegen (wird automatisch gespeichert)</div>
+    </div>
+    <div class="muted" style="margin-top:8px">Tipp: Beim Laden einer Datei vom Gerät wird sie <b>automatisch</b> dauerhaft im Browser (IndexedDB) gespeichert. Du kannst auch <code>?src=&lt;PDF-URL&gt;</code> an die Seitenadresse anhängen, um beim Laden automatisch zu öffnen (nicht automatisch gespeichert).</div>
+  </header>
+
+  <div id="layout">
+    <aside id="sidebar">
+      <div id="library">
+        <h2>Gespeicherte PDFs</h2>
+        <div id="saved-list" class="saved-list empty muted">Noch nichts gespeichert.</div>
+      </div>
+    </aside>
+    <div id="viewer-wrapper">
+      <iframe id="viewer" title="PDF-Viewer" allow="fullscreen"></iframe>
+    </div>
+  </div>
+
+  <div id="status" class="status" hidden>
+    <span id="status-text"></span>
+    <span id="open-link-wrapper" hidden> – <a id="open-link" href="#" target="_blank" rel="noopener noreferrer">in neuem Tab öffnen</a></span>
+  </div>
+
+  <script>
+  (async function(){
+    const fileInput = document.getElementById('file-input');
+    const urlInput = document.getElementById('url-input');
+    const loadUrlBtn = document.getElementById('load-url-btn');
+    const saveUrlBtn = document.getElementById('save-url-btn');
+    const viewer = document.getElementById('viewer');
+    const dropzone = document.getElementById('dropzone');
+    const statusBox = document.getElementById('status');
+    const statusText = document.getElementById('status-text');
+    const openLink = document.getElementById('open-link');
+    const openLinkWrapper = document.getElementById('open-link-wrapper');
+    const savedList = document.getElementById('saved-list');
+
+    let lastBlobUrl = null;
+
+    // ---- IndexedDB Setup ----
+    const DB_NAME = 'pdfViewerDB';
+    const DB_VER = 1;
+    const STORE = 'files';
+
+    function openDB(){
+      return new Promise((resolve, reject)=>{
+        const req = indexedDB.open(DB_NAME, DB_VER);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if(!db.objectStoreNames.contains(STORE)){
+            const os = db.createObjectStore(STORE, { keyPath:'id', autoIncrement:true });
+            os.createIndex('savedAt', 'savedAt');
+            os.createIndex('name', 'name');
+          }
+        };
+        req.onsuccess = ()=> resolve(req.result);
+        req.onerror = ()=> reject(req.error);
+      });
+    }
+
+    const db = await openDB();
+
+    function dbAdd(record){
+      return new Promise((resolve, reject)=>{
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.onabort = () => reject(tx.error);
+        tx.oncomplete = () => resolve();
+        const store = tx.objectStore(STORE);
+        store.add(record).onsuccess = (e)=>{ record.id = e.target.result; };
+      });
+    }
+
+    function dbGet(id){
+      return new Promise((resolve, reject)=>{
+        const tx = db.transaction(STORE, 'readonly');
+        const store = tx.objectStore(STORE);
+        const req = store.get(id);
+        req.onsuccess = ()=> resolve(req.result || null);
+        req.onerror = ()=> reject(req.error);
+      });
+    }
+
+    function dbDelete(id){
+      return new Promise((resolve, reject)=>{
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.oncomplete = ()=> resolve();
+        tx.onerror = ()=> reject(tx.error);
+        tx.objectStore(STORE).delete(id);
+      });
+    }
+
+    function dbGetAll(){
+      return new Promise((resolve, reject)=>{
+        const tx = db.transaction(STORE, 'readonly');
+        const store = tx.objectStore(STORE);
+        const req = store.getAll();
+        req.onsuccess = ()=> resolve(req.result || []);
+        req.onerror = ()=> reject(req.error);
+      });
+    }
+
+    // ---- UI helpers ----
+    function showStatus(message, isError=false, urlForOpen=null){
+      statusBox.hidden = false;
+      statusBox.classList.toggle('error', !!isError);
+      statusText.innerHTML = message;
+      if(urlForOpen){
+        openLinkWrapper.hidden = false;
+        openLink.href = urlForOpen;
+      } else {
+        openLinkWrapper.hidden = true;
+        openLink.removeAttribute('href');
+      }
+    }
+
+    function clearBlobUrl(){
+      if(lastBlobUrl){
+        try { URL.revokeObjectURL(lastBlobUrl); } catch(_){}
+        lastBlobUrl = null;
+      }
+    }
+
+    function escapeHtml(str){
+      return String(str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[s]));
+    }
+
+    function formatBytes(bytes){
+      if(!Number.isFinite(bytes)) return '';
+      const units = ['B','KB','MB','GB'];
+      let i=0, v=bytes; while(v>=1024 && i<units.length-1){ v/=1024; i++; }
+      return v.toFixed(v<10 && i>0?1:0)+' '+units[i];
+    }
+
+    function formatDate(ts){
+      try { return new Date(ts).toLocaleString(); } catch { return ''; }
+    }
+
+    function renderSavedList(items){
+      savedList.innerHTML = '';
+      if(!items.length){
+        savedList.classList.add('empty','muted');
+        savedList.textContent = 'Noch nichts gespeichert.';
+        return;
+      }
+      savedList.classList.remove('empty','muted');
+      items.sort((a,b)=> b.savedAt - a.savedAt);
+      for(const it of items){
+        const div = document.createElement('div');
+        div.className = 'saved-item';
+        div.innerHTML = `
+          <div class="saved-top">
+            <div class="saved-name" title="${escapeHtml(it.name)}">${escapeHtml(it.name)}</div>
+            <div class="row-actions">
+              <button data-act="load" data-id="${it.id}">Öffnen</button>
+              <button data-act="delete" data-id="${it.id}">Löschen</button>
+            </div>
+          </div>
+          <div class="saved-meta">${formatBytes(it.size)} • gespeichert: ${formatDate(it.savedAt)}</div>
+        `;
+        savedList.appendChild(div);
+      }
+    }
+
+    async function refreshList(){
+      const items = await dbGetAll();
+      renderSavedList(items);
+    }
+
+    function rememberLast(id){
+      try{ localStorage.setItem('pdfViewer.lastId', String(id)); }catch{}
+    }
+    function readLast(){
+      try{ return parseInt(localStorage.getItem('pdfViewer.lastId'),10) || null; }catch{ return null; }
+    }
+
+    function setViewerFromBlob(blob, titleLabel){
+      clearBlobUrl();
+      const objectUrl = URL.createObjectURL(blob);
+      lastBlobUrl = objectUrl;
+      viewer.src = objectUrl;
+      showStatus(`<b>Geladen (gespeichert):</b> ${escapeHtml(titleLabel||'PDF')}`);
+      openLinkWrapper.hidden = true;
+    }
+
+    function loadPdf(url){
+      clearBlobUrl();
+      viewer.src = url;
+      showStatus(`<b>Geladen:</b> ${escapeHtml(url)}`, false, url);
+    }
+
+    async function saveFileToDB(file){
+      const record = {
+        name: file.name || 'Unbenannt.pdf',
+        type: file.type || 'application/pdf',
+        size: file.size,
+        savedAt: Date.now(),
+        blob: file
+      };
+      await dbAdd(record);
+      rememberLast(record.id);
+      await refreshList();
+      setViewerFromBlob(record.blob, record.name);
+    }
+
+    async function fetchAndSaveUrl(url){
+      try{
+        const res = await fetch(url, { mode:'cors' });
+        if(!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        if(blob.type && !blob.type.includes('pdf')){
+          // Nicht-blockierend, nur Hinweis
+          showStatus('Hinweis: Der abgerufene Inhalt scheint kein PDF zu sein.', true, url);
+        }
+        const file = new File([blob], url.split('/').pop() || 'aus_url.pdf', { type: blob.type || 'application/pdf' });
+        await saveFileToDB(file);
+      }catch(err){
+        showStatus('Konnte die URL nicht speichern: '+escapeHtml(String(err)), true, url);
+      }
+    }
+
+    // Datei-Upload -> automatisch speichern
+    fileInput.addEventListener('change', async (e)=>{
+      const [file] = e.target.files || [];
+      if(!file){ return; }
+      if(file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')){
+        showStatus('Bitte eine PDF-Datei wählen.', true);
+        return;
+      }
+      await saveFileToDB(file);
+    });
+
+    // URL laden (nur anzeigen)
+    loadUrlBtn.addEventListener('click', ()=>{
+      const url = (urlInput.value || '').trim();
+      if(!url){ showStatus('Bitte zuerst eine PDF-URL eingeben.', true); return; }
+      if(!/^https?:\/\//i.test(url)){ showStatus('Die URL sollte mit http:// oder https:// beginnen.', true); return; }
+      loadPdf(url);
+    });
+
+    // URL speichern (abrufen & dauerhaft speichern)
+    saveUrlBtn.addEventListener('click', ()=>{
+      const url = (urlInput.value || '').trim();
+      if(!url){ showStatus('Bitte zuerst eine PDF-URL eingeben.', true); return; }
+      if(!/^https?:\/\//i.test(url)){ showStatus('Die URL sollte mit http:// oder https:// beginnen.', true); return; }
+      fetchAndSaveUrl(url);
+    });
+
+    // Drag & Drop -> automatisch speichern
+    ;['dragenter','dragover'].forEach(ev=>{
+      dropzone.addEventListener(ev, (e)=>{ e.preventDefault(); e.stopPropagation(); dropzone.classList.add('is-dragover'); });
+    });
+    ;['dragleave','dragend','drop'].forEach(ev=>{
+      dropzone.addEventListener(ev, (e)=>{ e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('is-dragover'); });
+    });
+    dropzone.addEventListener('drop', async (e)=>{
+      const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if(file){ await saveFileToDB(file); }
+    });
+
+    // Klicks in der Bibliothek
+    savedList.addEventListener('click', async (e)=>{
+      const btn = e.target.closest('button');
+      if(!btn) return;
+      const id = parseInt(btn.getAttribute('data-id'),10);
+      const act = btn.getAttribute('data-act');
+      if(act === 'load'){
+        const rec = await dbGet(id);
+        if(rec){ setViewerFromBlob(rec.blob, rec.name); rememberLast(id); }
+      } else if(act === 'delete'){
+        await dbDelete(id);
+        await refreshList();
+        const last = readLast();
+        if(last === id){ rememberLast(''); }
+      }
+    });
+
+    // Auto-Laden via ?src=
+    try {
+      const params = new URLSearchParams(location.search);
+      const preSrc = params.get('src');
+      if(preSrc){ loadPdf(preSrc); urlInput.value = preSrc; }
+    } catch(_){}
+
+    // Beim Start: letzte gespeicherte öffnen
+    await refreshList();
+    const lastId = readLast();
+    if(lastId){
+      const rec = await dbGet(lastId);
+      if(rec){ setViewerFromBlob(rec.blob, rec.name); }
+    }
+
+    showStatus('Bereit. PDFs von Gerät werden automatisch gespeichert. URLs kannst du laden oder speichern.');
+  })();
+  </script>
+</body>
+</html>
